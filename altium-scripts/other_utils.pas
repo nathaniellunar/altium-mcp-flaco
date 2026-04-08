@@ -102,7 +102,7 @@ begin
     end;
 
     // Schematic export opens sheets by path; project may differ from focused
-    if (CommandName = 'get_schematic_data') then
+    if (CommandName = 'get_schematic_data') or (CommandName = 'schematic_edit') then
     begin
         Result := True;
         Exit;

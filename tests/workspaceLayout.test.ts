@@ -1,4 +1,11 @@
-import { cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -51,5 +58,23 @@ describe("ensureAltiumScriptBundle", () => {
     ensureAltiumScriptBundle(workspaceRoot, bundledDir);
     const marker = join(workspaceRoot, "AltiumScript", "Altium_API.pas");
     expect(readFileSync(marker, "utf8")).toContain("ExecuteCommand");
+  });
+
+  it("force:true recopies even when fingerprint matches", () => {
+    workspaceRoot = mkdtempSync(join(tmpdir(), "altium-mcp-ws-force-"));
+    bundledDir = mkdtempSync(join(tmpdir(), "altium-mcp-bundle-force-"));
+    writeFileSync(join(bundledDir, "Altium_API.PrjScr"), "[Design]\nVersion=1.0\n");
+    writeFileSync(join(bundledDir, "keep.pas"), "a\n");
+
+    ensureAltiumScriptBundle(workspaceRoot, bundledDir);
+    const keepPath = join(workspaceRoot, "AltiumScript", "keep.pas");
+    expect(readFileSync(keepPath, "utf8")).toContain("a");
+
+    rmSync(keepPath, { force: true });
+    ensureAltiumScriptBundle(workspaceRoot, bundledDir);
+    expect(existsSync(keepPath)).toBe(false);
+
+    ensureAltiumScriptBundle(workspaceRoot, bundledDir, { force: true });
+    expect(readFileSync(keepPath, "utf8")).toContain("a");
   });
 });

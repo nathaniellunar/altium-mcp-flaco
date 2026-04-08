@@ -50,7 +50,7 @@ After the first connection, you can call MCP tool `**configure_altium_exe**` onc
 | Symptom                    | Check                                                                                                                       |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `AD_NOT_FOUND`             | Run `**configure_altium_exe**` or set `ALTIUM_MCP_ALTIUM_EXE`.                                                              |
-| `TIMEOUT`                  | Altium not running or script blocked; confirm `AltiumScript` exists under workspace and firewall/antivirus allows `X2.EXE`. |
+| `TIMEOUT`                  | Altium not running, script blocked, or **DelphiScript debugger paused** (breakpoint): the bridge never writes `response.json`. Clear breakpoints / stop debugging / Continue in Altium. If stuck after abort, delete `.bridge.lock` in the workspace folder. `edit_schematic` waits up to 240s; other tools ~120s. |
 | `SCRIPT_PROJECT_NOT_FOUND` | Delete workspace `AltiumScript` folder and restart server to re-copy bundled scripts.                                       |
 | MCP disconnects            | Ensure nothing writes to **stdout** except MCP JSON-RPC (logs must use stderr).                                             |
 
