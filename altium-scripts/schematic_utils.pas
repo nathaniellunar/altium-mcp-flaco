@@ -586,18 +586,472 @@ begin
     end;
 end;
 
-// Match API paths from JSON (forward slashes, spacing) to Altium DM_FullPath (Windows)
+// Collapse JSON/Windows path quirks so comparisons match Altium DM_* paths (loaded before json_utils).
+function McpNormalizeWindowsPath(const S: String): String;
+var
+    T, Prev: String;
+    IsUnc: Boolean;
+begin
+    T := Trim(StringReplace(S, '/', '\', MkSet(rfReplaceAll)));
+    if T = '' then
+    begin
+        Result := '';
+        Exit;
+    end;
+    IsUnc := (Length(T) >= 2) and (T[1] = '\') and (T[2] = '\');
+    if IsUnc then
+    begin
+        Delete(T, 1, 2);
+        repeat
+            Prev := T;
+            T := StringReplace(T, '\\', '\', MkSet(rfReplaceAll));
+        until T = Prev;
+        Result := '\\' + T;
+    end
+    else
+    begin
+        repeat
+            Prev := T;
+            T := StringReplace(T, '\\', '\', MkSet(rfReplaceAll));
+        until T = Prev;
+        Result := T;
+    end;
+end;
+
+// Read one JSON string or bare token from a single pretty-printed request.json line after KeySub.
+function McpParseJSONLineValue(const Line, KeySub: String): String;
+var
+    KeyPos, ColonPos, i, LenLine: Integer;
+    OutStr, Tail: String;
+begin
+    Result := '';
+    KeyPos := Pos(KeySub, Line);
+    if KeyPos = 0 then
+        Exit;
+    ColonPos := 0;
+    for i := KeyPos + Length(KeySub) to Length(Line) do
+        if Line[i] = ':' then
+        begin
+            ColonPos := i;
+            Break;
+        end;
+    if ColonPos = 0 then
+        Exit;
+    i := ColonPos + 1;
+    LenLine := Length(Line);
+    while (i <= LenLine) and (Line[i] <= #32) do
+        Inc(i);
+    if i > LenLine then
+        Exit;
+    if Line[i] = '"' then
+    begin
+        Inc(i);
+        OutStr := '';
+        while i <= LenLine do
+        begin
+            if Line[i] = '\' then
+            begin
+                Inc(i);
+                if i > LenLine then
+                    Break;
+                case Line[i] of
+                    '\', '"':
+                        OutStr := OutStr + Line[i];
+                    'n':
+                        OutStr := OutStr + #10;
+                    'r':
+                        OutStr := OutStr + #13;
+                    't':
+                        OutStr := OutStr + #9;
+                else
+                    OutStr := OutStr + Line[i];
+                end;
+                Inc(i);
+            end
+            else if Line[i] = '"' then
+                Break
+            else
+            begin
+                OutStr := OutStr + Line[i];
+                Inc(i);
+            end;
+        end;
+        Result := OutStr;
+        Exit;
+    end;
+    Tail := Copy(Line, i, LenLine - i + 1);
+    Tail := Trim(Tail);
+    while (Length(Tail) > 0) and (Tail[Length(Tail)] = ',') do
+        SetLength(Tail, Length(Tail) - 1);
+    Result := Trim(Tail);
+end;
+
+// Parse a JSON string array from pretty-printed request (same pattern as schematic_edit).
+procedure SchDataParseStringArray(RequestData: TStringList; const ArrayKeySub: String; List: TStringList);
+var
+    ParamValue: String;
+    i: Integer;
+begin
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if Pos(ArrayKeySub, RequestData[i]) > 0 then
+        begin
+            i := i + 1;
+            while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+            begin
+                ParamValue := RequestData[i];
+                ParamValue := StringReplace(ParamValue, '"', '', 1);
+                ParamValue := StringReplace(ParamValue, ',', '', 1);
+                ParamValue := Trim(ParamValue);
+                if (ParamValue <> '') and (ParamValue <> '[') then
+                    List.Add(ParamValue);
+                i := i + 1;
+            end;
+            Break;
+        end;
+    end;
+end;
+
+type
+    TSchMcpInclude = record
+        WantSheet: Boolean;
+        WantComponents: Boolean;
+        WantWires: Boolean;
+        WantBuses: Boolean;
+        WantNetLabels: Boolean;
+        WantPowerPorts: Boolean;
+        WantTextLabels: Boolean;
+        WantJunctions: Boolean;
+        WantPorts: Boolean;
+        WantOffSheetConnectors: Boolean;
+        WantSheetSymbols: Boolean;
+        WantDirectives: Boolean;
+        WantFigures: Boolean;
+        WantHarness: Boolean;
+        WantDrawingObjects: Boolean;
+    end;
+
+const
+    SCH_DRAW_FILTER_WIRES = 1;
+    SCH_DRAW_FILTER_BUSES = 2;
+    SCH_DRAW_FILTER_NETLABELS = 3;
+    SCH_DRAW_FILTER_POWER = 4;
+    SCH_DRAW_FILTER_TEXT = 5;
+    SCH_DRAW_FILTER_JUNCTIONS = 6;
+    SCH_DRAW_FILTER_PORTS = 7;
+    SCH_DRAW_FILTER_OFFSHEET = 8;
+    SCH_DRAW_FILTER_SHEETSYM = 9;
+    SCH_DRAW_FILTER_DIRECTIVES = 10;
+    SCH_DRAW_FILTER_FIGURES = 11;
+
+procedure SchMcpSetAllIncludes(var F: TSchMcpInclude);
+begin
+    F.WantSheet := True;
+    F.WantComponents := True;
+    F.WantWires := True;
+    F.WantBuses := True;
+    F.WantNetLabels := True;
+    F.WantPowerPorts := True;
+    F.WantTextLabels := True;
+    F.WantJunctions := True;
+    F.WantPorts := True;
+    F.WantOffSheetConnectors := True;
+    F.WantSheetSymbols := True;
+    F.WantDirectives := True;
+    F.WantFigures := True;
+    F.WantHarness := True;
+    F.WantDrawingObjects := True;
+end;
+
+procedure SchMcpResolveIncludes(const Tokens: TStringList; var F: TSchMcpInclude; var LegacyCombined: Boolean);
+var
+    i: Integer;
+    T: String;
+    AnyValid: Boolean;
+begin
+    LegacyCombined := (Tokens.Count = 0);
+    if LegacyCombined then
+        Exit;
+    FillChar(F, SizeOf(F), 0);
+    AnyValid := False;
+    for i := 0 to Tokens.Count - 1 do
+    begin
+        T := Trim(LowerCase(Tokens[i]));
+        if T = 'all' then
+        begin
+            SchMcpSetAllIncludes(F);
+            AnyValid := True;
+            Exit;
+        end
+        else if T = 'sheet' then begin F.WantSheet := True; AnyValid := True; end
+        else if T = 'components' then begin F.WantComponents := True; AnyValid := True; end
+        else if T = 'wires' then begin F.WantWires := True; AnyValid := True; end
+        else if T = 'buses' then begin F.WantBuses := True; AnyValid := True; end
+        else if T = 'net_labels' then begin F.WantNetLabels := True; AnyValid := True; end
+        else if T = 'power_ports' then begin F.WantPowerPorts := True; AnyValid := True; end
+        else if T = 'text_labels' then begin F.WantTextLabels := True; AnyValid := True; end
+        else if T = 'junctions' then begin F.WantJunctions := True; AnyValid := True; end
+        else if T = 'ports' then begin F.WantPorts := True; AnyValid := True; end
+        else if T = 'off_sheet_connectors' then begin F.WantOffSheetConnectors := True; AnyValid := True; end
+        else if T = 'sheet_symbols' then begin F.WantSheetSymbols := True; AnyValid := True; end
+        else if T = 'directives' then begin F.WantDirectives := True; AnyValid := True; end
+        else if T = 'figures' then begin F.WantFigures := True; AnyValid := True; end
+        else if T = 'harness' then begin F.WantHarness := True; AnyValid := True; end
+        else if T = 'drawing_objects' then begin F.WantDrawingObjects := True; AnyValid := True; end;
+    end;
+    if not AnyValid then
+        LegacyCombined := True;
+end;
+
+procedure SchAppendFilteredDrawings(CurrentSch: ISch_Document; const Sheet: String;
+    Target: TStringList; FilterKind: Integer);
+var
+    It: ISch_Iterator;
+    Prim: ISch_BasicContainer;
+begin
+    It := CurrentSch.SchIterator_Create;
+    case FilterKind of
+        SCH_DRAW_FILTER_WIRES:
+            It.AddFilter_ObjectSet(MkSet(eWire));
+        SCH_DRAW_FILTER_BUSES:
+            It.AddFilter_ObjectSet(MkSet(eBus, eBusEntry));
+        SCH_DRAW_FILTER_NETLABELS:
+            It.AddFilter_ObjectSet(MkSet(eNetLabel));
+        SCH_DRAW_FILTER_POWER:
+            It.AddFilter_ObjectSet(MkSet(ePowerObject));
+        SCH_DRAW_FILTER_TEXT:
+            It.AddFilter_ObjectSet(MkSet(eLabel));
+        SCH_DRAW_FILTER_JUNCTIONS:
+            It.AddFilter_ObjectSet(MkSet(eJunction));
+        SCH_DRAW_FILTER_PORTS:
+            It.AddFilter_ObjectSet(MkSet(ePort));
+        SCH_DRAW_FILTER_OFFSHEET:
+            It.AddFilter_ObjectSet(MkSet(eCrossSheetConnector));
+        SCH_DRAW_FILTER_SHEETSYM:
+            It.AddFilter_ObjectSet(MkSet(eSheetSymbol));
+        SCH_DRAW_FILTER_DIRECTIVES:
+            It.AddFilter_ObjectSet(MkSet(eNoERC, eCompileMask));
+        SCH_DRAW_FILTER_FIGURES:
+            It.AddFilter_ObjectSet(MkSet(eLine, ePolyline, eBezier, ePolygon, eRectangle, eEllipse, eArc, eRoundRectangle, eImage, eTextFrame, eConnectionLine));
+    else
+        begin
+            CurrentSch.SchIterator_Destroy(It);
+            Exit;
+        end;
+    end;
+    Prim := It.FirstSchObject;
+    while Prim <> nil do
+    begin
+        SchSerializeDrawingObject(Sheet, Prim, Target);
+        Prim := It.NextSchObject;
+    end;
+    CurrentSch.SchIterator_Destroy(It);
+end;
+
+function SchBuildSheetInfoObject(CurrentSch: ISch_Document; const SheetPath: String): String;
+var
+    SheetProps: TStringList;
+begin
+    SheetProps := TStringList.Create;
+    try
+        AddJSONProperty(SheetProps, 'schematic_full_path', SheetPath, True);
+        AddJSONBoolean(SheetProps, 'use_custom_sheet', CurrentSch.UseCustomSheet);
+        AddJSONNumber(SheetProps, 'sheet_size_x_mils', CoordToMils(CurrentSch.GetState_SheetSizeX));
+        AddJSONNumber(SheetProps, 'sheet_size_y_mils', CoordToMils(CurrentSch.GetState_SheetSizeY));
+        AddJSONNumber(SheetProps, 'custom_x_mils', CoordToMils(CurrentSch.GetState_CustomX));
+        AddJSONNumber(SheetProps, 'custom_y_mils', CoordToMils(CurrentSch.GetState_CustomY));
+        AddJSONInteger(SheetProps, 'sheet_style_ordinal', Ord(CurrentSch.GetState_SheetStyle));
+        AddJSONNumber(SheetProps, 'snap_grid_mils', CoordToMils(CurrentSch.GetState_SnapGridSize));
+        AddJSONNumber(SheetProps, 'visible_grid_mils', CoordToMils(CurrentSch.GetState_VisibleGridSize));
+        AddJSONBoolean(SheetProps, 'snap_grid_on', CurrentSch.SnapGridOn);
+        AddJSONBoolean(SheetProps, 'visible_grid_on', CurrentSch.VisibleGridOn);
+        AddJSONBoolean(SheetProps, 'title_block_on', CurrentSch.TitleBlockOn);
+        AddJSONBoolean(SheetProps, 'border_on', CurrentSch.BorderOn);
+        AddJSONProperty(SheetProps, 'template_file_name', CurrentSch.GetState_TemplateFileName, True);
+        Result := BuildJSONObject(SheetProps);
+    finally
+        SheetProps.Free;
+    end;
+end;
+
+// Match API paths from JSON (forward slashes, escaped backslashes) to Altium DM_FullPath (Windows)
 function SchPathsEqual(const PathA, PathB: String): Boolean;
 var
     NA, NB: String;
 begin
-    NA := Trim(LowerCase(StringReplace(PathA, '/', '\', MkSet(rfReplaceAll))));
-    NB := Trim(LowerCase(StringReplace(PathB, '/', '\', MkSet(rfReplaceAll))));
+    NA := Trim(LowerCase(McpNormalizeWindowsPath(PathA)));
+    NB := Trim(LowerCase(McpNormalizeWindowsPath(PathB)));
     Result := AnsiCompareText(NA, NB) = 0;
 end;
 
-// project_full_path / schematic_full_path / sheet file name: all optional (empty = focused project, all sheets)
-function GetSchematicData(ROOT_DIR: String; ProjectFullPath, SchematicFullPath, SheetFileFilter: String): String;
+procedure SchAddGraphicalBboxMils(Gr: ISch_GraphicalObject; Props: TStringList);
+var
+    R: TCoordRect;
+begin
+    R := Gr.BoundingRectangle;
+    AddJSONNumber(Props, 'bbox_left_mils', CoordToMils(R.Left));
+    AddJSONNumber(Props, 'bbox_right_mils', CoordToMils(R.Right));
+    AddJSONNumber(Props, 'bbox_top_mils', CoordToMils(R.Top));
+    AddJSONNumber(Props, 'bbox_bottom_mils', CoordToMils(R.Bottom));
+end;
+
+procedure SchAppendVerticesMilsJson(Props: TStringList; Poly: ISch_Polygon);
+var
+    VItems, Pair: TStringList;
+    VC, i: Integer;
+    Pt: TLocation;
+begin
+    VItems := TStringList.Create;
+    try
+        VC := Poly.VerticesCount;
+        for i := 1 to VC do
+        begin
+            Pt := Poly.GetState_Vertex(i);
+            Pair := TStringList.Create;
+            try
+                AddJSONNumber(Pair, 'x_mils', CoordToMils(Pt.X));
+                AddJSONNumber(Pair, 'y_mils', CoordToMils(Pt.Y));
+                VItems.Add(BuildJSONObject(Pair, 1));
+            finally
+                Pair.Free;
+            end;
+        end;
+        if VItems.Count > 0 then
+            Props.Add('"vertices_mils": ' + BuildJSONArray(VItems, '', 0));
+    finally
+        VItems.Free;
+    end;
+end;
+
+function SchSchematicDrawingObjectKind(ObjId: TObjectId): String;
+begin
+    if ObjId = eWire then Result := 'eWire'
+    else if ObjId = eBus then Result := 'eBus'
+    else if ObjId = eBusEntry then Result := 'eBusEntry'
+    else if ObjId = eNetLabel then Result := 'eNetLabel'
+    else if ObjId = eLabel then Result := 'eLabel'
+    else if ObjId = eLine then Result := 'eLine'
+    else if ObjId = eJunction then Result := 'eJunction'
+    else if ObjId = ePort then Result := 'ePort'
+    else if ObjId = ePowerObject then Result := 'ePowerObject'
+    else if ObjId = eCrossSheetConnector then Result := 'eCrossSheetConnector'
+    else if ObjId = eSheetSymbol then Result := 'eSheetSymbol'
+    else if ObjId = eNoERC then Result := 'eNoERC'
+    else if ObjId = eConnectionLine then Result := 'eConnectionLine'
+    else if ObjId = ePolyline then Result := 'ePolyline'
+    else if ObjId = eBezier then Result := 'eBezier'
+    else if ObjId = ePolygon then Result := 'ePolygon'
+    else if ObjId = eRectangle then Result := 'eRectangle'
+    else if ObjId = eEllipse then Result := 'eEllipse'
+    else if ObjId = eArc then Result := 'eArc'
+    else if ObjId = eRoundRectangle then Result := 'eRoundRectangle'
+    else if ObjId = eImage then Result := 'eImage'
+    else if ObjId = eTextFrame then Result := 'eTextFrame'
+    else if ObjId = eCompileMask then Result := 'eCompileMask'
+    else Result := 'unknown';
+end;
+
+// Non-component primitives on the sheet (wires, buses, graphics, labels, etc.).
+// Sheet title-block / document parameters (eParameter) are omitted — noise for MCP; component parameters stay under components[].
+procedure SchSerializeDrawingObject(const Sheet: String; Obj: ISch_BasicContainer; Drawings: TStringList);
+var
+    Props: TStringList;
+    Gr: ISch_GraphicalObject;
+    Poly: ISch_Polygon;
+    Ln: ISch_Line;
+    NL: ISch_NetLabel;
+    Lb: ISch_Label;
+    Pr: ISch_Port;
+    SSym: ISch_SheetSymbol;
+    Jun: ISch_Junction;
+begin
+    Props := TStringList.Create;
+    try
+        AddJSONProperty(Props, 'sheet', Sheet);
+        AddJSONProperty(Props, 'object_kind', SchSchematicDrawingObjectKind(Obj.ObjectId));
+        AddJSONInteger(Props, 'object_id', Ord(Obj.ObjectId));
+
+        Gr := Obj;
+        SchAddGraphicalBboxMils(Gr, Props);
+
+        if (Obj.ObjectId = eWire) or (Obj.ObjectId = eBus) or
+           (Obj.ObjectId = ePolyline) or (Obj.ObjectId = eBezier) or (Obj.ObjectId = ePolygon) then
+        begin
+            Poly := Obj;
+            SchAppendVerticesMilsJson(Props, Poly);
+        end
+        else if (Obj.ObjectId = eBusEntry) or (Obj.ObjectId = eLine) or (Obj.ObjectId = eConnectionLine) then
+        begin
+            Ln := Obj;
+            AddJSONNumber(Props, 'x1_mils', CoordToMils(Ln.Location.X));
+            AddJSONNumber(Props, 'y1_mils', CoordToMils(Ln.Location.Y));
+            AddJSONNumber(Props, 'x2_mils', CoordToMils(Ln.Corner.X));
+            AddJSONNumber(Props, 'y2_mils', CoordToMils(Ln.Corner.Y));
+        end
+        else if Obj.ObjectId = eNetLabel then
+        begin
+            NL := Obj;
+            AddJSONProperty(Props, 'text', NL.Text);
+            AddJSONNumber(Props, 'x_mils', CoordToMils(NL.Location.X));
+            AddJSONNumber(Props, 'y_mils', CoordToMils(NL.Location.Y));
+        end
+        else if (Obj.ObjectId = eLabel) or (Obj.ObjectId = ePowerObject) or (Obj.ObjectId = eCrossSheetConnector) then
+        begin
+            Lb := Obj;
+            AddJSONProperty(Props, 'text', Lb.Text);
+            AddJSONNumber(Props, 'x_mils', CoordToMils(Lb.Location.X));
+            AddJSONNumber(Props, 'y_mils', CoordToMils(Lb.Location.Y));
+        end
+        else if Obj.ObjectId = eJunction then
+        begin
+            Jun := Obj;
+            AddJSONNumber(Props, 'x_mils', CoordToMils(Jun.Location.X));
+            AddJSONNumber(Props, 'y_mils', CoordToMils(Jun.Location.Y));
+        end
+        else if Obj.ObjectId = ePort then
+        begin
+            Pr := Obj;
+            AddJSONProperty(Props, 'name', Pr.Name);
+            AddJSONNumber(Props, 'x_mils', CoordToMils(Pr.Location.X));
+            AddJSONNumber(Props, 'y_mils', CoordToMils(Pr.Location.Y));
+        end
+        else if Obj.ObjectId = eSheetSymbol then
+        begin
+            SSym := Obj;
+            AddJSONProperty(Props, 'sheet_file_name', SSym.SheetFileName);
+            AddJSONProperty(Props, 'sheet_name', SSym.SheetName);
+        end;
+
+        Drawings.Add(BuildJSONObject(Props, 1));
+    finally
+        Props.Free;
+    end;
+end;
+
+procedure SchCollectDrawingObjectsForSheet(CurrentSch: ISch_Document; const Sheet: String; Drawings: TStringList);
+var
+    It: ISch_Iterator;
+    Prim: ISch_BasicContainer;
+begin
+    It := CurrentSch.SchIterator_Create;
+    It.AddFilter_ObjectSet(MkSet(
+        eWire, eBus, eBusEntry, eNetLabel, eLabel, eLine, eJunction, ePort, ePowerObject,
+        eCrossSheetConnector, eSheetSymbol, eNoERC, eConnectionLine,
+        ePolyline, eBezier, ePolygon, eRectangle, eEllipse, eArc, eRoundRectangle,
+        eImage, eTextFrame, eCompileMask));
+    Prim := It.FirstSchObject;
+    while Prim <> nil do
+    begin
+        SchSerializeDrawingObject(Sheet, Prim, Drawings);
+        Prim := It.NextSchObject;
+    end;
+    CurrentSch.SchIterator_Destroy(It);
+end;
+
+// project_full_path / schematic_full_path / sheet file name: all optional (empty = focused project, all sheets).
+// RequestData: optional include_queries JSON array; when absent, legacy shape { components, drawing_objects } only.
+function GetSchematicData(ROOT_DIR: String; ProjectFullPath, SchematicFullPath, SheetFileFilter: String;
+    RequestData: TStringList): String;
 var
     WS          : IWorkspace;
     Project     : IProject;
@@ -609,6 +1063,8 @@ var
     Parameter, NextParameter : ISch_Parameter;
     Rect        : TCoordRect;
     ComponentsArray : TStringList;
+    DrawingsArray   : TStringList;
+    RootPairs       : TStringList;
     CompProps   : TStringList;
     ParamsProps : TStringList;
     OutputLines : TStringList;
@@ -618,6 +1074,12 @@ var
     i, pi       : Integer;
     SchematicCount, ComponentCount : Integer;
     Found       : Boolean;
+    IncludeTokens   : TStringList;
+    IncFlags        : TSchMcpInclude;
+    LegacyCombined  : Boolean;
+    SheetsJsonParts : TStringList;
+    WiresSL, BusesSL, NetLabelsSL, PowerSL, TextSL, JunSL, PortsSL, OffSL, SheetSymSL, DirSL, FigSL : TStringList;
+    EchoSL          : TStringList;
 begin
     Result := '';
 
@@ -629,6 +1091,11 @@ begin
     end;
 
     Project := nil;
+
+    if ProjectFullPath <> '' then
+        ProjectFullPath := McpNormalizeWindowsPath(ProjectFullPath);
+    if SchematicFullPath <> '' then
+        SchematicFullPath := McpNormalizeWindowsPath(SchematicFullPath);
 
     if SchematicFullPath <> '' then
     begin
@@ -683,9 +1150,43 @@ begin
         Exit;
     end;
 
-    // Create array for components
+    IncludeTokens := TStringList.Create;
+    try
+        if RequestData <> nil then
+            SchDataParseStringArray(RequestData, '"include_queries"', IncludeTokens);
+        SchMcpResolveIncludes(IncludeTokens, IncFlags, LegacyCombined);
+
+    // Create array for components and non-component drawing primitives
     ComponentsArray := TStringList.Create;
-    
+    DrawingsArray := TStringList.Create;
+    SheetsJsonParts := nil;
+    WiresSL := nil;
+    BusesSL := nil;
+    NetLabelsSL := nil;
+    PowerSL := nil;
+    TextSL := nil;
+    JunSL := nil;
+    PortsSL := nil;
+    OffSL := nil;
+    SheetSymSL := nil;
+    DirSL := nil;
+    FigSL := nil;
+    if not LegacyCombined then
+    begin
+        SheetsJsonParts := TStringList.Create;
+        WiresSL := TStringList.Create;
+        BusesSL := TStringList.Create;
+        NetLabelsSL := TStringList.Create;
+        PowerSL := TStringList.Create;
+        TextSL := TStringList.Create;
+        JunSL := TStringList.Create;
+        PortsSL := TStringList.Create;
+        OffSL := TStringList.Create;
+        SheetSymSL := TStringList.Create;
+        DirSL := TStringList.Create;
+        FigSL := TStringList.Create;
+    end;
+
     try
         // Count the number of schematic documents
         SchematicCount := 0;
@@ -720,6 +1221,8 @@ begin
 
                 If (CurrentSch <> Nil) Then
                 Begin
+                    if LegacyCombined or IncFlags.WantComponents then
+                    begin
                     // Get schematic components
                     Iterator := CurrentSch.SchIterator_Create;
                     Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
@@ -811,19 +1314,112 @@ begin
                     End;
 
                     CurrentSch.SchIterator_Destroy(Iterator);
+                    end;
+
+                    if LegacyCombined then
+                        SchCollectDrawingObjectsForSheet(CurrentSch, Doc.DM_FullPath, DrawingsArray)
+                    else begin
+                        if IncFlags.WantSheet and (SheetsJsonParts <> nil) then
+                            SheetsJsonParts.Add(SchBuildSheetInfoObject(CurrentSch, Doc.DM_FullPath));
+                        if IncFlags.WantWires then
+                            SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, WiresSL, SCH_DRAW_FILTER_WIRES);
+                        if IncFlags.WantBuses then
+                            SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, BusesSL, SCH_DRAW_FILTER_BUSES);
+                        if IncFlags.WantNetLabels then
+                            SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, NetLabelsSL, SCH_DRAW_FILTER_NETLABELS);
+                        if IncFlags.WantPowerPorts then
+                            SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, PowerSL, SCH_DRAW_FILTER_POWER);
+                        if IncFlags.WantTextLabels then
+                            SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, TextSL, SCH_DRAW_FILTER_TEXT);
+                        if IncFlags.WantJunctions then
+                            SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, JunSL, SCH_DRAW_FILTER_JUNCTIONS);
+                        if IncFlags.WantPorts then
+                            SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, PortsSL, SCH_DRAW_FILTER_PORTS);
+                        if IncFlags.WantOffSheetConnectors then
+                            SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, OffSL, SCH_DRAW_FILTER_OFFSHEET);
+                        if IncFlags.WantSheetSymbols then
+                            SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, SheetSymSL, SCH_DRAW_FILTER_SHEETSYM);
+                        if IncFlags.WantDirectives then
+                            SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, DirSL, SCH_DRAW_FILTER_DIRECTIVES);
+                        if IncFlags.WantFigures then
+                            SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, FigSL, SCH_DRAW_FILTER_FIGURES);
+                        if IncFlags.WantDrawingObjects then
+                            SchCollectDrawingObjectsForSheet(CurrentSch, Doc.DM_FullPath, DrawingsArray);
+                    end;
                 End;
             End;
         End;
-        
-        // Build the final JSON array
+
+        // Root JSON: legacy { components, drawing_objects } or filtered buckets + include_queries echo
         OutputLines := TStringList.Create;
+        RootPairs := TStringList.Create;
+        EchoSL := TStringList.Create;
         try
-            OutputLines.Text := BuildJSONArray(ComponentsArray);
+            if LegacyCombined then
+            begin
+                RootPairs.Add(JSONPairStr('components', BuildJSONArray(ComponentsArray), False));
+                RootPairs.Add(JSONPairStr('drawing_objects', BuildJSONArray(DrawingsArray), False));
+            end
+            else begin
+                RootPairs.Add(JSONPairStr('schematic_data_mode', 'filtered', True));
+                for i := 0 to IncludeTokens.Count - 1 do
+                    EchoSL.Add('"' + JSONEscapeString(IncludeTokens[i]) + '"');
+                RootPairs.Add(JSONPairStr('include_queries', BuildJSONArray(EchoSL, '', 0), False));
+                if IncFlags.WantSheet and (SheetsJsonParts <> nil) then
+                    RootPairs.Add(JSONPairStr('sheets', BuildJSONArray(SheetsJsonParts, '', 0), False));
+                if IncFlags.WantComponents then
+                    RootPairs.Add(JSONPairStr('components', BuildJSONArray(ComponentsArray), False));
+                if IncFlags.WantWires then
+                    RootPairs.Add(JSONPairStr('wires', BuildJSONArray(WiresSL), False));
+                if IncFlags.WantBuses then
+                    RootPairs.Add(JSONPairStr('buses', BuildJSONArray(BusesSL), False));
+                if IncFlags.WantNetLabels then
+                    RootPairs.Add(JSONPairStr('net_labels', BuildJSONArray(NetLabelsSL), False));
+                if IncFlags.WantPowerPorts then
+                    RootPairs.Add(JSONPairStr('power_ports', BuildJSONArray(PowerSL), False));
+                if IncFlags.WantTextLabels then
+                    RootPairs.Add(JSONPairStr('text_labels', BuildJSONArray(TextSL), False));
+                if IncFlags.WantJunctions then
+                    RootPairs.Add(JSONPairStr('junctions', BuildJSONArray(JunSL), False));
+                if IncFlags.WantPorts then
+                    RootPairs.Add(JSONPairStr('ports', BuildJSONArray(PortsSL), False));
+                if IncFlags.WantOffSheetConnectors then
+                    RootPairs.Add(JSONPairStr('off_sheet_connectors', BuildJSONArray(OffSL), False));
+                if IncFlags.WantSheetSymbols then
+                    RootPairs.Add(JSONPairStr('sheet_symbols', BuildJSONArray(SheetSymSL), False));
+                if IncFlags.WantDirectives then
+                    RootPairs.Add(JSONPairStr('directives', BuildJSONArray(DirSL), False));
+                if IncFlags.WantFigures then
+                    RootPairs.Add(JSONPairStr('figures', BuildJSONArray(FigSL), False));
+                if IncFlags.WantDrawingObjects then
+                    RootPairs.Add(JSONPairStr('drawing_objects', BuildJSONArray(DrawingsArray), False));
+                if IncFlags.WantHarness then
+                    RootPairs.Add('"harness": []');
+            end;
+            OutputLines.Text := BuildJSONObject(RootPairs);
             Result := WriteJSONToFile(OutputLines, ROOT_DIR+'temp_schematic_data.json');
         finally
+            EchoSL.Free;
+            RootPairs.Free;
             OutputLines.Free;
         end;
     finally
+        if FigSL <> nil then FigSL.Free;
+        if DirSL <> nil then DirSL.Free;
+        if SheetSymSL <> nil then SheetSymSL.Free;
+        if OffSL <> nil then OffSL.Free;
+        if PortsSL <> nil then PortsSL.Free;
+        if JunSL <> nil then JunSL.Free;
+        if TextSL <> nil then TextSL.Free;
+        if PowerSL <> nil then PowerSL.Free;
+        if NetLabelsSL <> nil then NetLabelsSL.Free;
+        if BusesSL <> nil then BusesSL.Free;
+        if WiresSL <> nil then WiresSL.Free;
+        if SheetsJsonParts <> nil then SheetsJsonParts.Free;
+        DrawingsArray.Free;
         ComponentsArray.Free;
+    end;
+    finally
+        IncludeTokens.Free;
     end;
 end;

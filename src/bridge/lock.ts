@@ -1,7 +1,37 @@
-import { closeSync, openSync, unlinkSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import { join } from "node:path";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * If .bridge.lock references a PID that no longer exists (crashed MCP / killed process),
+ * remove the lock so the next tool call is not blocked for the full wait window.
+ */
+function removeStaleBridgeLock(lockPath: string): void {
+  if (!existsSync(lockPath)) return;
+  try {
+    const raw = readFileSync(lockPath, "utf8").trim();
+    const pid = Number.parseInt(raw, 10);
+    if (!Number.isFinite(pid) || pid <= 0) {
+      unlinkSync(lockPath);
+      return;
+    }
+    try {
+      process.kill(pid, 0);
+    } catch {
+      unlinkSync(lockPath);
+    }
+  } catch {
+    /* ignore */
+  }
+}
 
 export class LockTimeoutError extends Error {
   constructor(message = "Could not acquire bridge lock in time") {
@@ -21,6 +51,7 @@ export async function withBridgeLock<T>(
   const waitMs = options.waitMs ?? 60_000;
   const pollMs = options.pollMs ?? 50;
   const lockPath = join(workspaceRoot, ".bridge.lock");
+  removeStaleBridgeLock(lockPath);
   const deadline = Date.now() + waitMs;
   let fd: number | undefined;
 

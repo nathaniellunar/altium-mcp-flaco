@@ -13,7 +13,7 @@
     },
     "command": {
       "type": "string",
-      "description": "DelphiScript dispatcher command (e.g. ping, get_pcb_layers)."
+      "description": "DelphiScript dispatcher command (e.g. ping, get_pcb_layers, schematic_edit, get_schematic_data)."
     }
   }
 }

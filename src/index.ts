@@ -1,13 +1,39 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import { existsSync } from "node:fs";
-import { AltiumBridge, defaultBundledScriptsDir } from "./bridge/altiumBridge.js";
+import {
+  AltiumBridge,
+  defaultBundledScriptsDir,
+  readBridgeDiagnosticSnippets,
+} from "./bridge/altiumBridge.js";
 import { getFileModeCapabilities } from "./fileMode.js";
+import { ALTIUM_MCP_INSTRUCTIONS } from "./mcpInstructions.js";
+import {
+  annotationsConfigWrite,
+  annotationsNodeOnly,
+  annotationsReadOnlyLive,
+  DESCRIPTION_ALTIUM_PING,
+  DESCRIPTION_CONFIGURE_ALTIUM_EXE,
+  DESCRIPTION_FILE_MODE_CAPABILITIES,
+  DESCRIPTION_GET_ALL_DESIGNATORS,
+  DESCRIPTION_GET_ALL_NETS,
+  DESCRIPTION_GET_COMPONENT_PINS,
+  DESCRIPTION_GET_PCB_LAYERS,
+  DESCRIPTION_GET_PCB_LAYER_STACKUP,
+  DESCRIPTION_GET_PCB_RULES,
+  DESCRIPTION_EDIT_SCHEMATIC,
+  DESCRIPTION_GET_SCHEMATIC_DATA,
+  DESCRIPTION_GET_SERVER_STATUS,
+  DESCRIPTION_GET_WORKSPACE_PROJECTS,
+  annotationsSchematicEdit,
+} from "./toolDefinitions.js";
+import { editSchematicInputSchema } from "./tools/editSchematic.js";
+import { getSchematicDataInputSchema } from "./tools/getSchematicData.js";
 import { parseDesignatorsFromComponentData } from "./tools/designators.js";
 import { errResult, jsonResult } from "./tools/helpers.js";
-import { ALTIUM_MCP_INSTRUCTIONS } from "./mcpInstructions.js";
 
 const bridge = new AltiumBridge({
   bundledScriptsDir: defaultBundledScriptsDir(),
@@ -27,14 +53,15 @@ server.registerTool(
   "get_server_status",
   {
     title: "Altium MCP server status",
-    description:
-      "Returns workspace paths, Altium X2.EXE resolution, script project path, and bridge file locations. Use before other tools to verify setup (Windows + Altium Designer 22+).",
+    description: DESCRIPTION_GET_SERVER_STATUS,
+    annotations: annotationsReadOnlyLive,
     inputSchema: z.object({}),
   },
   async () => {
     bridge.ensureLayout();
     const exe = bridge.resolveAltiumExePath();
     const script = bridge.getScriptProjectPath();
+    const diag = readBridgeDiagnosticSnippets(bridge.workspaceRoot);
     const data = {
       platform: process.platform,
       workspaceRoot: bridge.workspaceRoot,
@@ -45,6 +72,10 @@ server.registerTool(
       altiumExeFound: exe ? existsSync(exe) : false,
       scriptProjectFound: existsSync(script),
       bundledScriptsDir: defaultBundledScriptsDir(),
+      bridgeLastError: diag.bridgeLastError,
+      bridgeUserReportedError: diag.bridgeUserReportedError,
+      diagnosticsHint:
+        "On Altium script compile/runtime errors: paste Messages panel text into workspace file bridge_user_reported_error.txt (UTF-8), then call get_server_status again. bridge_last_error.txt is written by the bridge on failed responses.",
       env: {
         ALTIUM_MCP_WORKSPACE: process.env.ALTIUM_MCP_WORKSPACE ?? null,
         ALTIUM_MCP_ALTIUM_EXE: process.env.ALTIUM_MCP_ALTIUM_EXE ?? null,
@@ -58,10 +89,14 @@ server.registerTool(
   "configure_altium_exe",
   {
     title: "Save Altium X2.EXE path",
-    description:
-      "Persists the full path to Altium X2.EXE under the user config file (~/.altium-mcp/config.json). Required for launching the DelphiScript bridge.",
+    description: DESCRIPTION_CONFIGURE_ALTIUM_EXE,
+    annotations: annotationsConfigWrite,
     inputSchema: {
-      path: z.string().describe("Absolute path to X2.EXE, e.g. C:\\Program Files\\Altium\\AD24\\X2.EXE"),
+      path: z
+        .string()
+        .describe(
+          "Absolute path to Altium X2.EXE on disk (must exist). Example: C:\\Program Files\\Altium\\AD25\\X2.EXE",
+        ),
     },
   },
   async ({ path: exePath }) => {
@@ -77,8 +112,8 @@ server.registerTool(
   "altium_ping",
   {
     title: "Ping Altium bridge",
-    description:
-      "Runs the DelphiScript bridge ping command. Altium Designer should be installed; it may be launched if not already running.",
+    description: DESCRIPTION_ALTIUM_PING,
+    annotations: annotationsReadOnlyLive,
     inputSchema: z.object({}),
   },
   async () => {
@@ -90,28 +125,41 @@ server.registerTool(
 registerLiveCommand(
   "get_workspace_projects",
   "Workspace projects and files",
-  "Lists all open workspace projects (PrjPcb, PrjScr, etc.) and each project's logical documents with kind, full path, and file name. Identifies the focused project.",
+  DESCRIPTION_GET_WORKSPACE_PROJECTS,
   "list_workspace",
+  {},
+  annotationsReadOnlyLive,
 );
 
-registerLiveCommand(
-  "get_schematic_data",
-  "Schematic components",
-  "Returns placed components from schematic sheets (designator, sheet path, position, rotation, parameters). Use schematic_full_path for any open .SchDoc (project is resolved automatically). Or project_full_path + optional schematic_sheet_file_name. If both path args are omitted, uses the focused project and all sheets (or filter by schematic_sheet_file_name).",
+server.registerTool(
   "get_schematic_data",
   {
-    schematic_full_path: z
-      .string()
-      .optional()
-      .describe("Absolute path to a .SchDoc that belongs to an open project, e.g. D:\\\\Design\\\\Sheet1.SchDoc"),
-    project_full_path: z
-      .string()
-      .optional()
-      .describe("Absolute path to an open .PrjPcb / .PrjScr when not using schematic_full_path"),
-    schematic_sheet_file_name: z
-      .string()
-      .optional()
-      .describe('File name only, e.g. Sheet1.SchDoc — applies with focused project or project_full_path'),
+    title: "Schematic sheet (filtered export)",
+    description: DESCRIPTION_GET_SCHEMATIC_DATA,
+    annotations: annotationsReadOnlyLive,
+    inputSchema: getSchematicDataInputSchema,
+  },
+  async (params) => {
+    const r = await bridge.executeCommand(
+      "get_schematic_data",
+      params as Record<string, unknown>,
+    );
+    return jsonResult(r);
+  },
+);
+
+server.registerTool(
+  "edit_schematic",
+  {
+    title: "Edit schematic sheet",
+    description: DESCRIPTION_EDIT_SCHEMATIC,
+    annotations: annotationsSchematicEdit,
+    inputSchema: editSchematicInputSchema,
+  },
+  async (params) => {
+    const p = params as Record<string, unknown>;
+    const r = await bridge.executeCommand("schematic_edit", p, { timeoutMs: 240_000 });
+    return jsonResult(r);
   },
 );
 
@@ -121,12 +169,14 @@ function registerLiveCommand(
   description: string,
   command: string,
   shape: z.ZodRawShape = {},
+  annotations?: ToolAnnotations,
 ) {
   server.registerTool(
     name,
     {
       title,
       description,
+      annotations,
       inputSchema: z.object(shape),
     },
     async (params) => {
@@ -139,36 +189,45 @@ function registerLiveCommand(
 registerLiveCommand(
   "get_pcb_layers",
   "List PCB layers",
-  "Returns electrical and mechanical layer metadata for the active PCB document in Altium.",
+  DESCRIPTION_GET_PCB_LAYERS,
   "get_pcb_layers",
+  {},
+  annotationsReadOnlyLive,
 );
 
 registerLiveCommand(
   "get_pcb_rules",
   "List PCB design rules",
-  "Returns design rule descriptions from the active PCB.",
+  DESCRIPTION_GET_PCB_RULES,
   "get_pcb_rules",
+  {},
+  annotationsReadOnlyLive,
 );
 
 registerLiveCommand(
   "get_all_nets",
   "List PCB nets",
-  "Returns unique net names from the active PCB.",
+  DESCRIPTION_GET_ALL_NETS,
   "get_all_nets",
+  {},
+  annotationsReadOnlyLive,
 );
 
 registerLiveCommand(
   "get_pcb_layer_stackup",
   "PCB layer stackup",
-  "Returns stackup data (dielectric, thickness) for the active PCB.",
+  DESCRIPTION_GET_PCB_LAYER_STACKUP,
   "get_pcb_layer_stackup",
+  {},
+  annotationsReadOnlyLive,
 );
 
 server.registerTool(
   "get_all_designators",
   {
     title: "Component designators",
-    description: "Returns all component designators on the active PCB (via get_all_component_data).",
+    description: DESCRIPTION_GET_ALL_DESIGNATORS,
+    annotations: annotationsReadOnlyLive,
     inputSchema: z.object({}),
   },
   async () => {
@@ -185,11 +244,15 @@ server.registerTool(
   "get_component_pins",
   {
     title: "Component pins",
-    description: "Returns pin information for the given component designators on the active PCB.",
+    description: DESCRIPTION_GET_COMPONENT_PINS,
+    annotations: annotationsReadOnlyLive,
     inputSchema: {
       designators: z
         .array(z.string())
-        .describe('Designators e.g. ["U1","R2"]'),
+        .min(1)
+        .describe(
+          "PCB reference designators to query (must exist on the active board). Example: [\"U1\",\"Q2\",\"C10\"]",
+        ),
     },
   },
   async ({ designators }) => {
@@ -202,14 +265,15 @@ server.registerTool(
   "file_mode_capabilities",
   {
     title: "File-mode capabilities",
-    description:
-      "Reports whether offline .PcbLib/.SchLib tools are available in this build (extension point for Rust sidecar).",
+    description: DESCRIPTION_FILE_MODE_CAPABILITIES,
+    annotations: annotationsNodeOnly,
     inputSchema: z.object({}),
   },
   async () => jsonResult(getFileModeCapabilities()),
 );
 
 async function main(): Promise<void> {
+  bridge.ensureLayout();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

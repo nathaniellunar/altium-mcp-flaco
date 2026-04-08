@@ -12,6 +12,7 @@ var
 	REQUEST_FILE : String;
     RESPONSE_FILE : String;
     ROOT_DIR: String;
+    BRIDGE_ERROR_LOG: String;
 
 {..............................................................................}
 { Initialize file paths based on script location                               }
@@ -33,6 +34,22 @@ begin
     // Set the file paths
     REQUEST_FILE := ROOT_DIR + 'request.json';
     RESPONSE_FILE := ROOT_DIR + 'response.json';
+    BRIDGE_ERROR_LOG := ROOT_DIR + 'bridge_last_error.txt';
+end;
+
+procedure BridgeWriteErrorLog(const Msg: String);
+var
+    F: TStringList;
+begin
+    if BRIDGE_ERROR_LOG = '' then
+        Exit;
+    F := TStringList.Create;
+    try
+        F.Add(Msg);
+        F.SaveToFile(BRIDGE_ERROR_LOG);
+    finally
+        F.Free;
+    end;
 end;
 
 // Extract the component pins logic
@@ -646,7 +663,7 @@ end;
 
 function ExecuteGetSchematicData(RequestData: TStringList): String;
 var
-    i, ValueStart: Integer;
+    i: Integer;
     Line: String;
     SheetFilter, ProjectFullPath, SchematicFullPath: String;
 begin
@@ -657,22 +674,13 @@ begin
     begin
         Line := RequestData[i];
         if Pos('"schematic_sheet_file_name"', Line) > 0 then
-        begin
-            ValueStart := Pos(':', Line) + 1;
-            SheetFilter := Trim(TrimJSON(Copy(Line, ValueStart, Length(Line) - ValueStart + 1)));
-        end
+            SheetFilter := Trim(McpParseJSONLineValue(Line, '"schematic_sheet_file_name"'))
         else if Pos('"project_full_path"', Line) > 0 then
-        begin
-            ValueStart := Pos(':', Line) + 1;
-            ProjectFullPath := Trim(TrimJSON(Copy(Line, ValueStart, Length(Line) - ValueStart + 1)));
-        end
+            ProjectFullPath := Trim(McpParseJSONLineValue(Line, '"project_full_path"'))
         else if Pos('"schematic_full_path"', Line) > 0 then
-        begin
-            ValueStart := Pos(':', Line) + 1;
-            SchematicFullPath := Trim(TrimJSON(Copy(Line, ValueStart, Length(Line) - ValueStart + 1)));
-        end;
+            SchematicFullPath := Trim(McpParseJSONLineValue(Line, '"schematic_full_path"'));
     end;
-    Result := GetSchematicData(ROOT_DIR, ProjectFullPath, SchematicFullPath, SheetFilter);
+    Result := GetSchematicData(ROOT_DIR, ProjectFullPath, SchematicFullPath, SheetFilter, RequestData);
 end;
 
 // Function to execute a command with parameters
@@ -699,6 +707,8 @@ begin
             Result := ExecuteCreateSchematicSymbol(RequestData);            
         'get_schematic_data':
             Result := ExecuteGetSchematicData(RequestData);            
+        'schematic_edit':
+            Result := SchematicEditMain(RequestData);
         'get_pcb_layers':
             Result := GetPCBLayers(ROOT_DIR);            
         'set_pcb_layer_visibility':
@@ -775,7 +785,8 @@ begin
     if (Pos('ERROR:', Data) = 1) then
     begin
         ActualSuccess := False;
-        ActualErrorMsg := Copy(Data, 8, Length(Data)); // Remove 'ERROR: ' prefix
+        // Preserve full Delphi message after 'ERROR:' (with or without space before detail)
+        ActualErrorMsg := Trim(Copy(Data, Length('ERROR:') + 1, Length(Data)));
     end
     else
     begin
@@ -802,6 +813,14 @@ begin
         else
         begin
             AddJSONProperty(ResultProps, 'error', ActualErrorMsg);
+        end;
+
+        if not ActualSuccess then
+        begin
+            if (Length(Data) > 0) and ((Data[1] = '{') or (Data[1] = '[')) then
+                BridgeWriteErrorLog('bridge failure' + #13#10 + 'error=' + ActualErrorMsg + #13#10 + 'resultJsonPrefix=' + Copy(Data, 1, 400))
+            else
+                BridgeWriteErrorLog('bridge failure' + #13#10 + 'error=' + ActualErrorMsg + #13#10 + 'data=' + Copy(Data, 1, 400));
         end;
         
         // Build response
@@ -889,8 +908,8 @@ begin
             Params.Free;
         end;
     except
-        // Simple exception handling without the specific exception type
-        WriteResponse(False, '', 'Exception occurred during script execution');
+        WriteResponse(False, '',
+            'Exception during script execution. Workspace file bridge_last_error.txt has this line; paste Altium Script Messages into bridge_user_reported_error.txt and run get_server_status.');
         ShowMessage('Error: Exception occurred during script execution');
     end;
 end;
