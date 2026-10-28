@@ -9,6 +9,8 @@ function ScriptProjectPath(Workspace: IWorkspace) : String;
 var
   Project   : IProject;
   scriptsPath : TDynamicString;
+  candidatePath : TDynamicString;
+  lastMatchPath : TDynamicString;
   projectCount : Integer;
   i      : Integer;
 begin
@@ -20,6 +22,7 @@ begin
     (of which we are a part).  Once we find this, we want to record the
     path to the script project directory. }
   scriptsPath:='';
+  lastMatchPath:='';
   for i:=0 to projectCount-1 do
   begin
     { Get reference to project # i. }
@@ -28,10 +31,20 @@ begin
     if (AnsiPos(constScriptProjectName, Project.DM_ProjectFullPath) > 0) then
     begin
       { Strip off project name to give us just the path. }
-      scriptsPath := StringReplace(Project.DM_ProjectFullPath, '\' +
+      candidatePath := StringReplace(Project.DM_ProjectFullPath, '\' +
       constScriptProjectName + '.PrjScr','', MkSet(rfReplaceAll,rfIgnoreCase));
+      lastMatchPath := candidatePath;
+      { Another MCP server's script project can share this name and be open
+        too. Prefer the project whose bridge folder (the same folder
+        InitializeFilePaths derives from this path) holds the request that
+        launched this run. }
+      if (scriptsPath = '') and
+         FileExists(ExtractFilePath(ExtractFilePath(candidatePath)) + 'request.json') then
+        scriptsPath := candidatePath;
     end;
   end;
+  { No pending request found anywhere: keep the old behaviour (last match). }
+  if (scriptsPath = '') then scriptsPath := lastMatchPath;
   result := scriptsPath;
 end;
 
