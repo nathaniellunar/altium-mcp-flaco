@@ -712,25 +712,6 @@ begin
     end;
 end;
 
-type
-    TSchMcpInclude = record
-        WantSheet: Boolean;
-        WantComponents: Boolean;
-        WantWires: Boolean;
-        WantBuses: Boolean;
-        WantNetLabels: Boolean;
-        WantPowerPorts: Boolean;
-        WantTextLabels: Boolean;
-        WantJunctions: Boolean;
-        WantPorts: Boolean;
-        WantOffSheetConnectors: Boolean;
-        WantSheetSymbols: Boolean;
-        WantDirectives: Boolean;
-        WantFigures: Boolean;
-        WantHarness: Boolean;
-        WantDrawingObjects: Boolean;
-    end;
-
 const
     SCH_DRAW_FILTER_WIRES = 1;
     SCH_DRAW_FILTER_BUSES = 2;
@@ -744,35 +725,43 @@ const
     SCH_DRAW_FILTER_DIRECTIVES = 10;
     SCH_DRAW_FILTER_FIGURES = 11;
 
-procedure SchMcpSetAllIncludes(var F: TSchMcpInclude);
+// DelphiScript cannot declare records, so the sections a request asks for are kept as a
+// list of names (the same words as the include_queries tokens).
+procedure SchMcpSetAllIncludes(F: TStringList);
 begin
-    F.WantSheet := True;
-    F.WantComponents := True;
-    F.WantWires := True;
-    F.WantBuses := True;
-    F.WantNetLabels := True;
-    F.WantPowerPorts := True;
-    F.WantTextLabels := True;
-    F.WantJunctions := True;
-    F.WantPorts := True;
-    F.WantOffSheetConnectors := True;
-    F.WantSheetSymbols := True;
-    F.WantDirectives := True;
-    F.WantFigures := True;
-    F.WantHarness := True;
-    F.WantDrawingObjects := True;
+    F.Clear;
+    F.Add('sheet');
+    F.Add('components');
+    F.Add('wires');
+    F.Add('buses');
+    F.Add('net_labels');
+    F.Add('power_ports');
+    F.Add('text_labels');
+    F.Add('junctions');
+    F.Add('ports');
+    F.Add('off_sheet_connectors');
+    F.Add('sheet_symbols');
+    F.Add('directives');
+    F.Add('figures');
+    F.Add('harness');
+    F.Add('drawing_objects');
 end;
 
-procedure SchMcpResolveIncludes(const Tokens: TStringList; var F: TSchMcpInclude; var LegacyCombined: Boolean);
+function SchMcpWant(F: TStringList; const Name: String): Boolean;
+begin
+    Result := (F.IndexOf(Name) >= 0);
+end;
+
+procedure SchMcpResolveIncludes(const Tokens: TStringList; F: TStringList; var LegacyCombined: Boolean);
 var
     i: Integer;
     T: String;
     AnyValid: Boolean;
 begin
     LegacyCombined := (Tokens.Count = 0);
+    F.Clear;
     if LegacyCombined then
         Exit;
-    FillChar(F, SizeOf(F), 0);
     AnyValid := False;
     for i := 0 to Tokens.Count - 1 do
     begin
@@ -783,69 +772,28 @@ begin
             AnyValid := True;
             Exit;
         end
-        else if T = 'sheet' then begin F.WantSheet := True; AnyValid := True; end
-        else if T = 'components' then begin F.WantComponents := True; AnyValid := True; end
-        else if T = 'wires' then begin F.WantWires := True; AnyValid := True; end
-        else if T = 'buses' then begin F.WantBuses := True; AnyValid := True; end
-        else if T = 'net_labels' then begin F.WantNetLabels := True; AnyValid := True; end
-        else if T = 'power_ports' then begin F.WantPowerPorts := True; AnyValid := True; end
-        else if T = 'text_labels' then begin F.WantTextLabels := True; AnyValid := True; end
-        else if T = 'junctions' then begin F.WantJunctions := True; AnyValid := True; end
-        else if T = 'ports' then begin F.WantPorts := True; AnyValid := True; end
-        else if T = 'off_sheet_connectors' then begin F.WantOffSheetConnectors := True; AnyValid := True; end
-        else if T = 'sheet_symbols' then begin F.WantSheetSymbols := True; AnyValid := True; end
-        else if T = 'directives' then begin F.WantDirectives := True; AnyValid := True; end
-        else if T = 'figures' then begin F.WantFigures := True; AnyValid := True; end
-        else if T = 'harness' then begin F.WantHarness := True; AnyValid := True; end
-        else if T = 'drawing_objects' then begin F.WantDrawingObjects := True; AnyValid := True; end;
+        else if (T = 'sheet') or
+         (T = 'components') or
+         (T = 'wires') or
+         (T = 'buses') or
+         (T = 'net_labels') or
+         (T = 'power_ports') or
+         (T = 'text_labels') or
+         (T = 'junctions') or
+         (T = 'ports') or
+         (T = 'off_sheet_connectors') or
+         (T = 'sheet_symbols') or
+         (T = 'directives') or
+         (T = 'figures') or
+         (T = 'harness') or
+         (T = 'drawing_objects') then
+        begin
+            F.Add(T);
+            AnyValid := True;
+        end;
     end;
     if not AnyValid then
         LegacyCombined := True;
-end;
-
-procedure SchAppendFilteredDrawings(CurrentSch: ISch_Document; const Sheet: String;
-    Target: TStringList; FilterKind: Integer);
-var
-    It: ISch_Iterator;
-    Prim: ISch_BasicContainer;
-begin
-    It := CurrentSch.SchIterator_Create;
-    case FilterKind of
-        SCH_DRAW_FILTER_WIRES:
-            It.AddFilter_ObjectSet(MkSet(eWire));
-        SCH_DRAW_FILTER_BUSES:
-            It.AddFilter_ObjectSet(MkSet(eBus, eBusEntry));
-        SCH_DRAW_FILTER_NETLABELS:
-            It.AddFilter_ObjectSet(MkSet(eNetLabel));
-        SCH_DRAW_FILTER_POWER:
-            It.AddFilter_ObjectSet(MkSet(ePowerObject));
-        SCH_DRAW_FILTER_TEXT:
-            It.AddFilter_ObjectSet(MkSet(eLabel));
-        SCH_DRAW_FILTER_JUNCTIONS:
-            It.AddFilter_ObjectSet(MkSet(eJunction));
-        SCH_DRAW_FILTER_PORTS:
-            It.AddFilter_ObjectSet(MkSet(ePort));
-        SCH_DRAW_FILTER_OFFSHEET:
-            It.AddFilter_ObjectSet(MkSet(eCrossSheetConnector));
-        SCH_DRAW_FILTER_SHEETSYM:
-            It.AddFilter_ObjectSet(MkSet(eSheetSymbol));
-        SCH_DRAW_FILTER_DIRECTIVES:
-            It.AddFilter_ObjectSet(MkSet(eNoERC, eCompileMask));
-        SCH_DRAW_FILTER_FIGURES:
-            It.AddFilter_ObjectSet(MkSet(eLine, ePolyline, eBezier, ePolygon, eRectangle, eEllipse, eArc, eRoundRectangle, eImage, eTextFrame, eConnectionLine));
-    else
-        begin
-            CurrentSch.SchIterator_Destroy(It);
-            Exit;
-        end;
-    end;
-    Prim := It.FirstSchObject;
-    while Prim <> nil do
-    begin
-        SchSerializeDrawingObject(Sheet, Prim, Target);
-        Prim := It.NextSchObject;
-    end;
-    CurrentSch.SchIterator_Destroy(It);
 end;
 
 function SchBuildSheetInfoObject(CurrentSch: ISch_Document; const SheetPath: String): String;
@@ -1018,14 +966,64 @@ begin
         else if Obj.ObjectId = eSheetSymbol then
         begin
             SSym := Obj;
-            AddJSONProperty(Props, 'sheet_file_name', SSym.SheetFileName);
-            AddJSONProperty(Props, 'sheet_name', SSym.SheetName);
+            // SheetFileName and SheetName are objects, not strings: passing them straight
+            // to a string parameter stops the script with 'Could not convert variant of
+            // type (Dispatch) into type (OleStr)'.
+            AddJSONProperty(Props, 'sheet_file_name', SSym.SheetFileName.Text);
+            AddJSONProperty(Props, 'sheet_name', SSym.SheetName.Text);
         end;
 
         Drawings.Add(BuildJSONObject(Props, 1));
     finally
         Props.Free;
     end;
+end;
+
+// Defined after SchSerializeDrawingObject on purpose: DelphiScript resolves names in file
+// order, so calling it from above fails with 'Undeclared identifier'.
+procedure SchAppendFilteredDrawings(CurrentSch: ISch_Document; const Sheet: String;
+    Target: TStringList; FilterKind: Integer);
+var
+    It: ISch_Iterator;
+    Prim: ISch_BasicContainer;
+begin
+    It := CurrentSch.SchIterator_Create;
+    case FilterKind of
+        SCH_DRAW_FILTER_WIRES:
+            It.AddFilter_ObjectSet(MkSet(eWire));
+        SCH_DRAW_FILTER_BUSES:
+            It.AddFilter_ObjectSet(MkSet(eBus, eBusEntry));
+        SCH_DRAW_FILTER_NETLABELS:
+            It.AddFilter_ObjectSet(MkSet(eNetLabel));
+        SCH_DRAW_FILTER_POWER:
+            It.AddFilter_ObjectSet(MkSet(ePowerObject));
+        SCH_DRAW_FILTER_TEXT:
+            It.AddFilter_ObjectSet(MkSet(eLabel));
+        SCH_DRAW_FILTER_JUNCTIONS:
+            It.AddFilter_ObjectSet(MkSet(eJunction));
+        SCH_DRAW_FILTER_PORTS:
+            It.AddFilter_ObjectSet(MkSet(ePort));
+        SCH_DRAW_FILTER_OFFSHEET:
+            It.AddFilter_ObjectSet(MkSet(eCrossSheetConnector));
+        SCH_DRAW_FILTER_SHEETSYM:
+            It.AddFilter_ObjectSet(MkSet(eSheetSymbol));
+        SCH_DRAW_FILTER_DIRECTIVES:
+            It.AddFilter_ObjectSet(MkSet(eNoERC, eCompileMask));
+        SCH_DRAW_FILTER_FIGURES:
+            It.AddFilter_ObjectSet(MkSet(eLine, ePolyline, eBezier, ePolygon, eRectangle, eEllipse, eArc, eRoundRectangle, eImage, eTextFrame, eConnectionLine));
+    else
+        begin
+            CurrentSch.SchIterator_Destroy(It);
+            Exit;
+        end;
+    end;
+    Prim := It.FirstSchObject;
+    while Prim <> nil do
+    begin
+        SchSerializeDrawingObject(Sheet, Prim, Target);
+        Prim := It.NextSchObject;
+    end;
+    CurrentSch.SchIterator_Destroy(It);
 end;
 
 procedure SchCollectDrawingObjectsForSheet(CurrentSch: ISch_Document; const Sheet: String; Drawings: TStringList);
@@ -1075,7 +1073,7 @@ var
     SchematicCount, ComponentCount : Integer;
     Found       : Boolean;
     IncludeTokens   : TStringList;
-    IncFlags        : TSchMcpInclude;
+    IncFlags        : TStringList;
     LegacyCombined  : Boolean;
     SheetsJsonParts : TStringList;
     WiresSL, BusesSL, NetLabelsSL, PowerSL, TextSL, JunSL, PortsSL, OffSL, SheetSymSL, DirSL, FigSL : TStringList;
@@ -1151,6 +1149,7 @@ begin
     end;
 
     IncludeTokens := TStringList.Create;
+    IncFlags := TStringList.Create;
     try
         if RequestData <> nil then
             SchDataParseStringArray(RequestData, '"include_queries"', IncludeTokens);
@@ -1221,7 +1220,7 @@ begin
 
                 If (CurrentSch <> Nil) Then
                 Begin
-                    if LegacyCombined or IncFlags.WantComponents then
+                    if LegacyCombined or SchMcpWant(IncFlags, 'components') then
                     begin
                     // Get schematic components
                     Iterator := CurrentSch.SchIterator_Create;
@@ -1319,31 +1318,31 @@ begin
                     if LegacyCombined then
                         SchCollectDrawingObjectsForSheet(CurrentSch, Doc.DM_FullPath, DrawingsArray)
                     else begin
-                        if IncFlags.WantSheet and (SheetsJsonParts <> nil) then
+                        if SchMcpWant(IncFlags, 'sheet') and (SheetsJsonParts <> nil) then
                             SheetsJsonParts.Add(SchBuildSheetInfoObject(CurrentSch, Doc.DM_FullPath));
-                        if IncFlags.WantWires then
+                        if SchMcpWant(IncFlags, 'wires') then
                             SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, WiresSL, SCH_DRAW_FILTER_WIRES);
-                        if IncFlags.WantBuses then
+                        if SchMcpWant(IncFlags, 'buses') then
                             SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, BusesSL, SCH_DRAW_FILTER_BUSES);
-                        if IncFlags.WantNetLabels then
+                        if SchMcpWant(IncFlags, 'net_labels') then
                             SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, NetLabelsSL, SCH_DRAW_FILTER_NETLABELS);
-                        if IncFlags.WantPowerPorts then
+                        if SchMcpWant(IncFlags, 'power_ports') then
                             SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, PowerSL, SCH_DRAW_FILTER_POWER);
-                        if IncFlags.WantTextLabels then
+                        if SchMcpWant(IncFlags, 'text_labels') then
                             SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, TextSL, SCH_DRAW_FILTER_TEXT);
-                        if IncFlags.WantJunctions then
+                        if SchMcpWant(IncFlags, 'junctions') then
                             SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, JunSL, SCH_DRAW_FILTER_JUNCTIONS);
-                        if IncFlags.WantPorts then
+                        if SchMcpWant(IncFlags, 'ports') then
                             SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, PortsSL, SCH_DRAW_FILTER_PORTS);
-                        if IncFlags.WantOffSheetConnectors then
+                        if SchMcpWant(IncFlags, 'off_sheet_connectors') then
                             SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, OffSL, SCH_DRAW_FILTER_OFFSHEET);
-                        if IncFlags.WantSheetSymbols then
+                        if SchMcpWant(IncFlags, 'sheet_symbols') then
                             SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, SheetSymSL, SCH_DRAW_FILTER_SHEETSYM);
-                        if IncFlags.WantDirectives then
+                        if SchMcpWant(IncFlags, 'directives') then
                             SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, DirSL, SCH_DRAW_FILTER_DIRECTIVES);
-                        if IncFlags.WantFigures then
+                        if SchMcpWant(IncFlags, 'figures') then
                             SchAppendFilteredDrawings(CurrentSch, Doc.DM_FullPath, FigSL, SCH_DRAW_FILTER_FIGURES);
-                        if IncFlags.WantDrawingObjects then
+                        if SchMcpWant(IncFlags, 'drawing_objects') then
                             SchCollectDrawingObjectsForSheet(CurrentSch, Doc.DM_FullPath, DrawingsArray);
                     end;
                 End;
@@ -1365,35 +1364,35 @@ begin
                 for i := 0 to IncludeTokens.Count - 1 do
                     EchoSL.Add('"' + JSONEscapeString(IncludeTokens[i]) + '"');
                 RootPairs.Add(JSONPairStr('include_queries', BuildJSONArray(EchoSL, '', 0), False));
-                if IncFlags.WantSheet and (SheetsJsonParts <> nil) then
+                if SchMcpWant(IncFlags, 'sheet') and (SheetsJsonParts <> nil) then
                     RootPairs.Add(JSONPairStr('sheets', BuildJSONArray(SheetsJsonParts, '', 0), False));
-                if IncFlags.WantComponents then
+                if SchMcpWant(IncFlags, 'components') then
                     RootPairs.Add(JSONPairStr('components', BuildJSONArray(ComponentsArray), False));
-                if IncFlags.WantWires then
+                if SchMcpWant(IncFlags, 'wires') then
                     RootPairs.Add(JSONPairStr('wires', BuildJSONArray(WiresSL), False));
-                if IncFlags.WantBuses then
+                if SchMcpWant(IncFlags, 'buses') then
                     RootPairs.Add(JSONPairStr('buses', BuildJSONArray(BusesSL), False));
-                if IncFlags.WantNetLabels then
+                if SchMcpWant(IncFlags, 'net_labels') then
                     RootPairs.Add(JSONPairStr('net_labels', BuildJSONArray(NetLabelsSL), False));
-                if IncFlags.WantPowerPorts then
+                if SchMcpWant(IncFlags, 'power_ports') then
                     RootPairs.Add(JSONPairStr('power_ports', BuildJSONArray(PowerSL), False));
-                if IncFlags.WantTextLabels then
+                if SchMcpWant(IncFlags, 'text_labels') then
                     RootPairs.Add(JSONPairStr('text_labels', BuildJSONArray(TextSL), False));
-                if IncFlags.WantJunctions then
+                if SchMcpWant(IncFlags, 'junctions') then
                     RootPairs.Add(JSONPairStr('junctions', BuildJSONArray(JunSL), False));
-                if IncFlags.WantPorts then
+                if SchMcpWant(IncFlags, 'ports') then
                     RootPairs.Add(JSONPairStr('ports', BuildJSONArray(PortsSL), False));
-                if IncFlags.WantOffSheetConnectors then
+                if SchMcpWant(IncFlags, 'off_sheet_connectors') then
                     RootPairs.Add(JSONPairStr('off_sheet_connectors', BuildJSONArray(OffSL), False));
-                if IncFlags.WantSheetSymbols then
+                if SchMcpWant(IncFlags, 'sheet_symbols') then
                     RootPairs.Add(JSONPairStr('sheet_symbols', BuildJSONArray(SheetSymSL), False));
-                if IncFlags.WantDirectives then
+                if SchMcpWant(IncFlags, 'directives') then
                     RootPairs.Add(JSONPairStr('directives', BuildJSONArray(DirSL), False));
-                if IncFlags.WantFigures then
+                if SchMcpWant(IncFlags, 'figures') then
                     RootPairs.Add(JSONPairStr('figures', BuildJSONArray(FigSL), False));
-                if IncFlags.WantDrawingObjects then
+                if SchMcpWant(IncFlags, 'drawing_objects') then
                     RootPairs.Add(JSONPairStr('drawing_objects', BuildJSONArray(DrawingsArray), False));
-                if IncFlags.WantHarness then
+                if SchMcpWant(IncFlags, 'harness') then
                     RootPairs.Add('"harness": []');
             end;
             OutputLines.Text := BuildJSONObject(RootPairs);
@@ -1421,5 +1420,6 @@ begin
     end;
     finally
         IncludeTokens.Free;
+        IncFlags.Free;
     end;
 end;
